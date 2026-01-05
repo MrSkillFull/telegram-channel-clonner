@@ -1,0 +1,5 @@
+# ignorar variáveis de ambiente
+.env
+
+# ignorar sessão do Telethon
+sessao.session
