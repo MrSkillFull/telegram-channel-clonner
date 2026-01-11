@@ -42,8 +42,6 @@ pip install -r requirements.txt
 ```env
 API_ID=seu_api_id
 API_HASH=seu_api_hash
-CANAL_ORIGEM=@canal_que_quero_copiar
-CANAL_DESTINO=@meu_canal_destino
 ```
 
 > **Como conseguir API_ID e API_HASH?**
@@ -57,7 +55,12 @@ No terminal, execute:
 python script-verificado.py
 ```
 
-Siga as instruções na tela. Na primeira vez, será necessário fazer login com seu número de telefone. Se sua conta tiver 2FA (verificação de dois fatores), além do código de confirmação será necessário colocar a senha.
+Siga as instruções na tela.
+1. Na primeira vez, será necessário fazer login com seu número de telefone.
+2. Em seguida, o script listará seus diálogos recentes (canais e grupos).
+3. Selecione o canal de **Origem** (digite o número da lista ou o @username).
+4. Selecione o canal de **Destino**.
+5. Opcionalmente, defina uma data de início para filtrar as mensagens.
 
 ## 🔒 Permissões e limitações do Telegram
 
