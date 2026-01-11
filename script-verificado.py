@@ -17,6 +17,7 @@ import asyncio
 import time
 import os
 import sys
+import datetime
 from dotenv import load_dotenv # Biblioteca para carregar variáveis de ambiente
 from tqdm import tqdm # Biblioteca para barra de progresso
 
@@ -105,23 +106,67 @@ async def main():
             print(f"Erro ao acessar canais: {e}")
             return
 
-        # Obter mensagens do canal de origem
-        # `limit=None` tentará buscar TODO o histórico — pode demorar e consumir memória/tempo.
+        # Obter mensagens do canal de origem (com opção de filtro por data)
         print("Baixando histórico de mensagens... (isso pode demorar dependendo do tamanho do canal)")
+
+        # Perguntar data inicial ao usuário antes de baixar o histórico
+        start_date = None
+        while True:
+            entrada = input("Data inicial (AAAA-MM-DD) ou Enter para todas: ").strip()
+            if entrada == "":
+                break
+            try:
+                start_date = datetime.datetime.strptime(entrada, "%Y-%m-%d").date()
+                break
+            except ValueError:
+                print("Formato inválido. Use AAAA-MM-DD.")
+
         messages = []
+
+        # Tentar obter contagem total para barra de progresso (opcional)
+        total_to_fetch = None
         try:
-            # limit=None para buscar TODAS as mensagens.
-            # Se quiser limitar, troque None por um número (ex: limit=100)
+            from telethon.tl.functions.messages import GetHistoryRequest
+            history = await client(GetHistoryRequest(peer=entity_origem, offset_id=0, offset_date=None,
+                                                     add_offset=0, limit=0, max_id=0, min_id=0, hash=0))
+            total_to_fetch = getattr(history, 'count', None)
+        except Exception:
+            total_to_fetch = None
+
+        pbar = tqdm(total=total_to_fetch, desc="Baixando", unit="msg") if total_to_fetch else tqdm(desc="Baixando", unit="msg")
+        try:
+            # iter_messages retorna do mais novo para o mais antigo — interromper ao encontrar mensagens mais antigas que a data solicitada
             async for message in client.iter_messages(canal_origem, limit=None):
+                if start_date:
+                    # algumas mensagens podem não ter atributo date — pular nesses casos
+                    if not hasattr(message, 'date') or message.date is None:
+                        pbar.update(1)
+                        continue
+                    try:
+                        msg_date = message.date.date()
+                    except Exception:
+                        pbar.update(1)
+                        continue
+                    if msg_date < start_date:
+                        # como já estamos indo para o passado, podemos parar — economiza requisições
+                        break
+
                 messages.append(message)
+                pbar.update(1)
         except Exception as e:
+            pbar.close()
             print(f"Erro ao obter mensagens: {e}")
             return
+        finally:
+            pbar.close()
         
         # Inverte a lista para preservar ordem cronológica ao reenviar (do mais antigo ao mais recente)
         messages.reverse()
         total_mensagens = len(messages)
-        print(f"Total de mensagens encontradas: {total_mensagens}")
+        if start_date:
+            print(f"Total de mensagens desde {start_date.isoformat()}: {total_mensagens}")
+        else:
+            print(f"Total de mensagens baixadas: {total_mensagens}")
 
         # Perguntar ao usuário quantas mensagens deseja copiar (interativo)
         num_to_copy = total_mensagens
