@@ -1,115 +1,145 @@
-"""Clona mensagens de um canal Telegram para outro.
+"""
+Script de Clonagem de Canais Telegram.
 
-Requisitos:
-- Defina `API_ID`, `API_HASH`, `CANAL_ORIGEM` e `CANAL_DESTINO` em um arquivo `.env` na raiz do projeto.
-- A sessão do Telethon será persistida em `sessao.session` (arquivo gerado automaticamente).
+Este script permite clonar mensagens (texto e mídia) de um canal, grupo ou usuário (origem)
+para outro (destino) de forma interativa. Utiliza a biblioteca Telethon para interagir
+com a API do Telegram.
+
+Funcionalidades:
+- Autenticação via API_ID e API_HASH (pode usar arquivo .env ou entrada manual).
+- Listagem e seleção interativa de diálogos (canais/chats) recentes.
+- Filtragem de mensagens por data de início.
+- Seleção de quantidade específica de mensagens a copiar.
+- Barra de progresso visual (tqdm).
+- Tratamento automático de limites de taxa (FloodWaitError).
+
+Dependências:
+- telethon
+- python-dotenv
+- tqdm
 
 Uso:
-- Execute o script e siga o prompt interativo para escolher quantas mensagens copiar.
-- Respeite permissões e privacidade: obtenha autorização para reproduzir conteúdo quando necessário.
-
-Este módulo é uma ferramenta simples de migração/backup de mensagens entre canais Telegram.
+    python script-verificado.py
 """
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 import asyncio
-import time
 import os
-import sys
 import datetime
-from dotenv import load_dotenv # Biblioteca para carregar variáveis de ambiente
-from tqdm import tqdm # Biblioteca para barra de progresso
+from dotenv import load_dotenv
+from tqdm import tqdm
 
-# Carregar variáveis de ambiente a partir do arquivo .env (API_ID, API_HASH, CANAL_ORIGEM, CANAL_DESTINO)
 load_dotenv()
 
-# Configurações da API do Telegram (lidas do .env). Podem ser usernames (str) ou IDs (int):
-api_id = os.getenv('API_ID')  # Carregar API ID do arquivo .env
-api_hash = os.getenv('API_HASH')  # Carregar API Hash do arquivo .env
-canal_origem = os.getenv('CANAL_ORIGEM')  # Nome de usuário ou ID do canal original
-canal_destino = os.getenv('CANAL_DESTINO')  # Nome de usuário ou ID do seu canal privado
-
-# Validação das variáveis de ambiente necessárias e instruções úteis se estiverem ausentes
-missing = []
-if not api_id:
-    missing.append('API_ID')
-if not api_hash:
-    missing.append('API_HASH')
-if not canal_origem:
-    missing.append('CANAL_ORIGEM')
-if not canal_destino:
-    missing.append('CANAL_DESTINO')
-
-if missing:
-    print('Erro: variáveis de ambiente ausentes ou não configuradas:')
-    for m in missing:
-        print(f' - {m}')
-    print('\nPor favor crie um arquivo .env na raiz do projeto com as variáveis abaixo (exemplo):')
-    print('API_ID=123456')
-    print('API_HASH=abcdef1234567890abcdef1234567890')
-    print("CANAL_ORIGEM=@nome_do_canal_ou_ID")
-    print("CANAL_DESTINO=@seu_canal_privado_ou_ID")
-    print('\nVocê pode obter o `API_ID` e o `API_HASH` em https://my.telegram.org.')
-    sys.exit(1)
-
-# Garantir que API_ID seja inteiro (Telethon espera um int para api_id)
-try:
-    api_id = int(api_id)
-except (ValueError, TypeError):
-    print('Erro: API_ID inválido. Ele deve ser um número inteiro (ex: 123456).')
-    print('Verifique seu arquivo .env e defina:')
-    print('API_ID=123456')
-    sys.exit(1)
-
-# Converter `canal_origem` e `canal_destino` para inteiro quando vierem como IDs numéricos.
-# Se forem usernames (ex: '@nome'), a conversão falhará e manteremos a string.
-try:
-    canal_origem = int(canal_origem)
-except (ValueError, TypeError):
-    pass
-
-try:
-    canal_destino = int(canal_destino)
-except (ValueError, TypeError):
-    pass
-
-# Conectar ao Telegram e executar a rotina principal
-async def main():
-    """Principal rotina assíncrona.
-
-    Conecta ao Telegram, valida acesso aos canais, baixa o histórico do canal de origem
-    e reenvia as mensagens para o canal destino preservando a ordem cronológica.
-
-    Observações:
-    - Usa as variáveis globais `api_id`, `api_hash`, `canal_origem` e `canal_destino`.
-    - Lida com `FloodWaitError` internamente para aguardar quando necessário.
+def ask_env_or_input(var_name, prompt_text, is_int=False):
     """
+    Obtém um valor de configuração a partir de variável de ambiente ou entrada do usuário.
 
-    # `async with` garante que a sessão seja corretamente aberta/fechada e que a sessão
-    # seja persistida em disco (arquivo `sessao.session`).
+    Verifica se existe um arquivo .env e se a variável está definida nele.
+    Caso contrário, solicita o valor via terminal.
+
+    Args:
+        var_name (str): O nome da variável de ambiente a ser buscada.
+        prompt_text (str): O texto a ser exibido no prompt se a entrada manual for necessária.
+        is_int (bool, optional): Se True, converte o valor de retorno para inteiro. Padrão é False.
+
+    Returns:
+        Union[str, int]: O valor da configuração (como string ou inteiro).
+    """
+    env_val = os.getenv(var_name)
+    # Se existir um arquivo .env, usar os valores definidos nele automaticamente.
+    # Só perguntar ao usuário se a variável estiver ausente no .env.
+    if os.path.exists('.env') and env_val:
+        return int(env_val) if is_int else env_val
+    # Caso não haja .env ou a variável esteja ausente, pedir entrada ao usuário.
+    while True:
+        v = input(f"{prompt_text}: ").strip()
+        if v == "":
+            print("Valor obrigatório. Tente novamente.")
+            continue
+        if is_int:
+            try:
+                return int(v)
+            except ValueError:
+                print("Informe um número inteiro válido.")
+                continue
+        return v
+
+async def choose_dialog(client, prompt):
+    """
+    Lista os diálogos recentes e permite ao usuário selecionar uma origem/destino.
+
+    Oferece uma interface interativa para escolher entre os últimos 200 diálogos
+    listados ou inserir manualmente um username/ID.
+
+    Args:
+        client (TelegramClient): A instância do cliente Telethon conectada.
+        prompt (str): Mensagem descritiva para orientar a escolha do usuário (ex: "Origem").
+
+    Returns:
+        entity: A entidade do Telegram (User, Chat ou Channel) selecionada, ou None se cancelado.
+    """
+    dialogs = await client.get_dialogs(limit=200)
+    print(f"\n{prompt}: escolha pelo número ou digite um @username ou ID manualmente.")
+    for i, d in enumerate(dialogs, start=1):
+        ent = d.entity
+        name = getattr(ent, "title", None) or getattr(ent, "first_name", None) or getattr(ent, "username", None) or str(getattr(ent, "id", ""))
+        username = getattr(ent, "username", None)
+        print(f"{i:3d}. {name}  (id={getattr(ent, 'id', None)}{f', @{username}' if username else ''})")
+    escolha = input("Número ou @username/ID: ").strip()
+    if escolha == "":
+        return None
+    if escolha.isdigit():
+        idx = int(escolha) - 1
+        if 0 <= idx < len(dialogs):
+            return dialogs[idx].entity
+        else:
+            print("Índice fora do intervalo.")
+            return await choose_dialog(client, prompt)
+    try:
+        maybe_id = int(escolha)
+        return await client.get_entity(maybe_id)
+    except ValueError:
+        return await client.get_entity(escolha)
+
+async def main():
+    """
+    Função principal que orquestra o processo de clonagem.
+
+    Steps:
+    1. Carrega credenciais (API_ID, API_HASH).
+    2. Conecta ao Telegram via Telethon.
+    3. Solicita seleção de origem e destino.
+    4. Filtra mensagens por data.
+    5. Baixa o histórico de mensagens.
+    6. Clona as mensagens para o destino respeitando limites de taxa.
+    """
+    # --- 1. Configuração e Autenticação ---
+    api_id = ask_env_or_input("API_ID", "Informe API_ID", is_int=True)
+    api_hash = ask_env_or_input("API_HASH", "Informe API_HASH")
+
     async with TelegramClient('sessao', api_id, api_hash) as client:
         print("Conectado ao Telegram!")
 
         try:
-            # Verificar se conseguimos acessar o canal de origem (username ou ID)
-            print(f"Tentando acessar canal origem: {canal_origem}")
-            entity_origem = await client.get_entity(canal_origem)
-            print(f"Canal origem encontrado: {entity_origem.title}")
-
-            # Verificar se conseguimos acessar o canal de destino
-            print(f"Tentando acessar canal destino: {canal_destino}")
-            entity_destino = await client.get_entity(canal_destino)
-            print(f"Canal destino encontrado: {entity_destino.first_name if hasattr(entity_destino, 'first_name') else 'Canal/Grupo'}")
-
+            # --- 2. Seleção de Diálogos (Origem e Destino) ---
+            origem_ent = await choose_dialog(client, "Selecionar canal/usuário de origem")
+            if origem_ent is None:
+                print("Origem não selecionada. Saindo.")
+                return
+            destino_ent = await choose_dialog(client, "Selecionar canal/usuário destino")
+            if destino_ent is None:
+                print("Destino não selecionado. Saindo.")
+                return
         except Exception as e:
-            print(f"Erro ao acessar canais: {e}")
+            print(f"Erro ao listar/selecionar diálogos: {e}")
             return
 
-        # Obter mensagens do canal de origem (com opção de filtro por data)
-        print("Baixando histórico de mensagens... (isso pode demorar dependendo do tamanho do canal)")
+        print(f"Origem selecionada: {getattr(origem_ent, 'title', getattr(origem_ent, 'first_name', getattr(origem_ent, 'username', origem_ent)))}")
+        print(f"Destino selecionado: {getattr(destino_ent, 'title', getattr(destino_ent, 'first_name', getattr(destino_ent, 'username', destino_ent)))}")
 
-        # Perguntar data inicial ao usuário antes de baixar o histórico
+        # --- 3. Definição de Filtros (Data) ---
         start_date = None
         while True:
             entrada = input("Data inicial (AAAA-MM-DD) ou Enter para todas: ").strip()
@@ -123,22 +153,22 @@ async def main():
 
         messages = []
 
-        # Tentar obter contagem total para barra de progresso (opcional)
+        # Tenta obter o total de mensagens para exibir barra de progresso precisa
         total_to_fetch = None
         try:
             from telethon.tl.functions.messages import GetHistoryRequest
-            history = await client(GetHistoryRequest(peer=entity_origem, offset_id=0, offset_date=None,
+            history = await client(GetHistoryRequest(peer=origem_ent, offset_id=0, offset_date=None,
                                                      add_offset=0, limit=0, max_id=0, min_id=0, hash=0))
             total_to_fetch = getattr(history, 'count', None)
         except Exception:
             total_to_fetch = None
 
+        # --- 4. Obtenção do Histórico ---
         pbar = tqdm(total=total_to_fetch, desc="Baixando", unit="msg") if total_to_fetch else tqdm(desc="Baixando", unit="msg")
         try:
-            # iter_messages retorna do mais novo para o mais antigo — interromper ao encontrar mensagens mais antigas que a data solicitada
-            async for message in client.iter_messages(canal_origem, limit=None):
+            async for message in client.iter_messages(origem_ent, limit=None):
+                # Filtra mensagens anteriores à data escolhida, se houver
                 if start_date:
-                    # algumas mensagens podem não ter atributo date — pular nesses casos
                     if not hasattr(message, 'date') or message.date is None:
                         pbar.update(1)
                         continue
@@ -148,9 +178,7 @@ async def main():
                         pbar.update(1)
                         continue
                     if msg_date < start_date:
-                        # como já estamos indo para o passado, podemos parar — economiza requisições
-                        break
-
+                        break # Como as mensagens vêm da mais recente para a mais antiga, podemos parar aqui
                 messages.append(message)
                 pbar.update(1)
         except Exception as e:
@@ -159,8 +187,8 @@ async def main():
             return
         finally:
             pbar.close()
-        
-        # Inverte a lista para preservar ordem cronológica ao reenviar (do mais antigo ao mais recente)
+
+        # Inverte a lista para que a ordem de clonagem seja cronológica (antiga -> nova)
         messages.reverse()
         total_mensagens = len(messages)
         if start_date:
@@ -168,7 +196,7 @@ async def main():
         else:
             print(f"Total de mensagens baixadas: {total_mensagens}")
 
-        # Perguntar ao usuário quantas mensagens deseja copiar (interativo)
+        # --- 5. Seleção de Quantidade ---
         num_to_copy = total_mensagens
         try:
             while True:
@@ -194,36 +222,29 @@ async def main():
             return
 
         if num_to_copy < total_mensagens:
-            # Seleciona apenas as primeiras `num_to_copy` mensagens já em ordem cronológica
+            # Como a lista foi invertida para ordem cronológica (Antiga -> Nova),
+            # selecionar os primeiros 'num_to_copy' elementos significa clonar as mensagens
+            # mais antigas a partir da data de início selecionada.
             messages = messages[:num_to_copy]
 
         print(f"Iniciando clonagem de {len(messages)} mensagens...")
-        # Barra de progresso usando tqdm
+        # --- 6. Loop de Clonagem ---
         for message in tqdm(messages, desc="Copiando", unit="msg"):
             try:
-                # Copiar mensagens para o canal destino
-                # Se a mensagem contém mídia (fotos, vídeos, documentos), reenviamos com `send_file`.
-                if message.media:  # Mensagens com mídia (fotos, vídeos, etc.)
-                    await client.send_file(canal_destino, message.media, caption=message.text)
-                elif message.text:  # Mensagens de texto (apenas se houver texto)
-                    await client.send_message(canal_destino, message.text)
+                # Se tiver mídia, usa send_file, senão send_message
+                if message.media:
+                    await client.send_file(destino_ent, message.media, caption=message.text)
+                elif message.text:
+                    await client.send_message(destino_ent, message.text)
                 else:
-                    # Alguns tipos (ex: enquetes, stickers) podem não ser tratáveis aqui e são ignorados.
-                    # Usamos `tqdm.write` para não corromper a barra de progresso ao imprimir.
-                    # tqdm.write(f"Mensagem {message.id} ignorada (sem conteúdo suportado).")
                     continue
-
-                # Pequena pausa para reduzir probabilidade de gatilho de limites do Telegram
-                # time.sleep(0.1)
-
             except FloodWaitError as e:
-                # FloodWaitError contém `seconds` — aguardamos o tempo recomendado pelo Telegram
+                # Tratamento de Rate Limit do Telegram
                 tqdm.write(f"Aguardando {e.seconds} segundos devido ao limite do Telegram...")
                 await asyncio.sleep(e.seconds)
             except Exception as e:
-                # Erros pontuais na cópia de uma mensagem são registrados e o processo continua
-                tqdm.write(f"Erro ao copiar mensagem {message.id}: {e}")
-        
+                tqdm.write(f"Erro ao copiar mensagem {getattr(message, 'id', '??')}: {e}")
+
         print("\nClonagem concluída com sucesso!")
 
 if __name__ == '__main__':
